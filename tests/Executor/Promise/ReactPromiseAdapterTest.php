@@ -2,7 +2,12 @@
 
 namespace GraphQL\Tests\Executor\Promise;
 
+use GraphQL\Executor\ExecutionResult;
 use GraphQL\Executor\Promise\Adapter\ReactPromiseAdapter;
+use GraphQL\GraphQL;
+use GraphQL\Type\Definition\ObjectType;
+use GraphQL\Type\Definition\Type;
+use GraphQL\Type\Schema;
 use PHPUnit\Framework\TestCase;
 use React\Promise\Deferred;
 use React\Promise\Promise;
@@ -171,5 +176,72 @@ final class ReactPromiseAdapterTest extends TestCase
         // Resolve the async promise
         $deferred->resolve(2);
         self::assertSame([1, 2, 3], $result);
+    }
+
+    public function testSyncFieldErrorWaitsForPendingSiblingPromise(): void
+    {
+        $setRejectionHandler = function_exists('\React\Promise\set_rejection_handler')
+            ? '\React\Promise\set_rejection_handler'
+            : null;
+
+        /** @var list<string> $unhandled */
+        $unhandled = [];
+        $previousHandler = $setRejectionHandler !== null
+            ? $setRejectionHandler(static function (\Throwable $reason) use (&$unhandled): void {
+                $unhandled[] = $reason->getMessage();
+            })
+            : null;
+
+        try {
+            $deferred = new Deferred();
+
+            $schema = new Schema([
+                'query' => new ObjectType([
+                    'name' => 'Query',
+                    'fields' => [
+                        'asyncField' => [
+                            'type' => Type::nonNull(Type::string()),
+                            'resolve' => static fn () => $deferred->promise(),
+                        ],
+                        'syncField' => [
+                            'type' => Type::nonNull(Type::string()),
+                            'resolve' => static fn () => null,
+                        ],
+                    ],
+                ]),
+            ]);
+
+            /** @var list<ExecutionResult> $results */
+            $results = [];
+            $getResults = static function () use (&$results): array {
+                return $results;
+            };
+            GraphQL::promiseToExecute(new ReactPromiseAdapter(), $schema, '{ asyncField syncField }')
+                ->then(static function (ExecutionResult $executionResult) use (&$results): void {
+                    $results[] = $executionResult;
+                });
+
+            self::assertSame([], $getResults(), 'The execution must wait for the pending sibling promise');
+
+            $deferred->resolve(null);
+
+            $results = $getResults();
+            self::assertCount(1, $results);
+            $result = $results[0];
+            self::assertNull($result->data);
+            self::assertCount(1, $result->errors);
+            self::assertSame(['syncField'], $result->errors[0]->getPath());
+
+            unset($deferred, $schema);
+            gc_collect_cycles();
+
+            if ($setRejectionHandler !== null) {
+                self::assertSame([], $unhandled);
+            }
+        } finally {
+            if ($setRejectionHandler !== null) {
+                $setRejectionHandler($previousHandler);
+            }
+        }
     }
 }

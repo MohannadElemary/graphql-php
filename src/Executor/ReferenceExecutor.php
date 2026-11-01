@@ -1027,20 +1027,35 @@ class ReferenceExecutor implements ExecutorImplementation
         $i = 0;
         $containsPromise = false;
         $completedItems = [];
-        foreach ($results as $item) {
-            $itemPath = [...$path, $i];
-            $info->path = $itemPath;
-            $itemUnaliasedPath = [...$unaliasedPath, $i];
-            $info->unaliasedPath = $itemUnaliasedPath;
-            ++$i;
+        try {
+            foreach ($results as $item) {
+                $itemPath = [...$path, $i];
+                $info->path = $itemPath;
+                $itemUnaliasedPath = [...$unaliasedPath, $i];
+                $info->unaliasedPath = $itemUnaliasedPath;
+                ++$i;
 
-            $completedItem = $this->completeValueCatchingError($itemType, $fieldNodes, $info, $itemPath, $itemUnaliasedPath, $item, $contextValue);
+                $completedItem = $this->completeValueCatchingError($itemType, $fieldNodes, $info, $itemPath, $itemUnaliasedPath, $item, $contextValue);
 
-            if (! $containsPromise && $this->getPromise($completedItem) !== null) {
-                $containsPromise = true;
+                if (! $containsPromise && $this->getPromise($completedItem) !== null) {
+                    $containsPromise = true;
+                }
+
+                $completedItems[] = $completedItem;
+            }
+        } catch (\Throwable $error) {
+            if (! $containsPromise) {
+                throw $error;
             }
 
-            $completedItems[] = $completedItem;
+            // Ensure that any promises returned by earlier items are handled, as they may also reject.
+            $rethrow = static function () use ($error): void {
+                throw $error;
+            };
+
+            return $this->exeContext->promiseAdapter
+                ->all($completedItems)
+                ->then($rethrow, $rethrow);
         }
 
         return $containsPromise
@@ -1395,18 +1410,18 @@ class ReferenceExecutor implements ExecutorImplementation
                 $results[$responseName] = $result;
             }
         } catch (\Throwable $error) {
-            if ($containsPromise) {
-                // Ensure that any promises returned by other fields are handled, as they may also reject.
-                $rethrow = static function () use ($error): void {
-                    throw $error;
-                };
-
-                return $this->exeContext->promiseAdapter
-                    ->all(array_values($results))
-                    ->then($rethrow, $rethrow);
+            if (! $containsPromise) {
+                throw $error;
             }
 
-            throw $error;
+            // Ensure that any promises returned by other fields are handled, as they may also reject.
+            $rethrow = static function () use ($error): void {
+                throw $error;
+            };
+
+            return $this->exeContext->promiseAdapter
+                ->all(array_values($results))
+                ->then($rethrow, $rethrow);
         }
 
         // If there are no promises, we can just return the object

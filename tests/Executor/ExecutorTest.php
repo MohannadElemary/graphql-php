@@ -30,7 +30,6 @@ final class ExecutorTest extends TestCase
 
     public function tearDown(): void
     {
-        SyncPromiseQueue::run();
         Executor::setDefaultPromiseAdapter();
     }
 
@@ -619,13 +618,56 @@ final class ExecutorTest extends TestCase
             }
         ');
 
-        $result = Executor::execute($schema, $document);
+        try {
+            $result = Executor::execute($schema, $document);
 
-        self::assertNull($result->data);
-        self::assertCount(1, $result->errors);
-        self::assertSame(['syncNullError'], $result->errors[0]->getPath());
-        self::assertTrue($isAsyncResolverFinished);
-        self::assertSame(0, SyncPromiseQueue::count());
+            self::assertNull($result->data);
+            self::assertCount(1, $result->errors);
+            self::assertSame(['syncNullError'], $result->errors[0]->getPath());
+            self::assertTrue($isAsyncResolverFinished);
+            self::assertSame(0, SyncPromiseQueue::count());
+        } finally {
+            SyncPromiseQueue::run();
+        }
+    }
+
+    public function testHandlesSyncListItemErrorsCombinedWithPendingItems(): void
+    {
+        $isAsyncItemFinished = false;
+
+        $schema = new Schema([
+            'query' => new ObjectType([
+                'name' => 'Query',
+                'fields' => [
+                    'items' => [
+                        'type' => Type::listOf(Type::nonNull(Type::string())),
+                        'resolve' => static function () use (&$isAsyncItemFinished): array {
+                            return [
+                                new Deferred(static function () use (&$isAsyncItemFinished): string {
+                                    $isAsyncItemFinished = true;
+
+                                    return 'async';
+                                }),
+                                null,
+                            ];
+                        },
+                    ],
+                ],
+            ]),
+        ]);
+
+        try {
+            $result = Executor::execute($schema, Parser::parse('{ items }'));
+
+            self::assertSame(['items' => null], $result->data);
+            self::assertCount(1, $result->errors);
+            self::assertSame('Cannot return null for non-nullable field "Query.items".', $result->errors[0]->getMessage());
+            self::assertSame(['items', 1], $result->errors[0]->getPath());
+            self::assertTrue($isAsyncItemFinished);
+            self::assertSame(0, SyncPromiseQueue::count());
+        } finally {
+            SyncPromiseQueue::run();
+        }
     }
 
     /** @see it('uses the inline operation if no operation name is provided') */
