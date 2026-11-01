@@ -1373,25 +1373,40 @@ class ReferenceExecutor implements ExecutorImplementation
     {
         $containsPromise = false;
         $results = [];
-        foreach ($fields as $responseName => $fieldNodes) {
-            $result = $this->resolveField(
-                $parentType,
-                $rootValue,
-                $fieldNodes,
-                $responseName,
-                $path,
-                $unaliasedPath,
-                $this->maybeScopeContext($contextValue)
-            );
-            if ($result === static::$UNDEFINED) {
-                continue;
+        try {
+            foreach ($fields as $responseName => $fieldNodes) {
+                $result = $this->resolveField(
+                    $parentType,
+                    $rootValue,
+                    $fieldNodes,
+                    $responseName,
+                    $path,
+                    $unaliasedPath,
+                    $this->maybeScopeContext($contextValue)
+                );
+                if ($result === static::$UNDEFINED) {
+                    continue;
+                }
+
+                if (! $containsPromise && $this->isPromise($result)) {
+                    $containsPromise = true;
+                }
+
+                $results[$responseName] = $result;
+            }
+        } catch (\Throwable $error) {
+            if ($containsPromise) {
+                // Ensure that any promises returned by other fields are handled, as they may also reject.
+                $rethrow = static function () use ($error): void {
+                    throw $error;
+                };
+
+                return $this->exeContext->promiseAdapter
+                    ->all(array_values($results))
+                    ->then($rethrow, $rethrow);
             }
 
-            if (! $containsPromise && $this->isPromise($result)) {
-                $containsPromise = true;
-            }
-
-            $results[$responseName] = $result;
+            throw $error;
         }
 
         // If there are no promises, we can just return the object

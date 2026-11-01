@@ -8,6 +8,7 @@ use GraphQL\Error\Error;
 use GraphQL\Error\FormattedError;
 use GraphQL\Error\UserError;
 use GraphQL\Executor\Executor;
+use GraphQL\Executor\Promise\Adapter\SyncPromiseQueue;
 use GraphQL\Language\AST\OperationDefinitionNode;
 use GraphQL\Language\Parser;
 use GraphQL\Tests\Executor\TestClasses\NotSpecial;
@@ -29,6 +30,7 @@ final class ExecutorTest extends TestCase
 
     public function tearDown(): void
     {
+        SyncPromiseQueue::run();
         Executor::setDefaultPromiseAdapter();
     }
 
@@ -580,6 +582,50 @@ final class ExecutorTest extends TestCase
         $result = Executor::execute($schema, $docAst, $data)->toArray();
 
         self::assertArraySubset($expected, $result);
+    }
+
+    /** @see it('handles sync errors combined with rejections') */
+    public function testHandlesSyncErrorsCombinedWithRejections(): void
+    {
+        $isAsyncResolverFinished = false;
+
+        $schema = new Schema([
+            'query' => new ObjectType([
+                'name' => 'Query',
+                'fields' => [
+                    'syncNullError' => [
+                        'type' => Type::nonNull(Type::string()),
+                        'resolve' => static fn () => null,
+                    ],
+                    'asyncNullError' => [
+                        'type' => Type::nonNull(Type::string()),
+                        'resolve' => static function () use (&$isAsyncResolverFinished): Deferred {
+                            return new Deferred(static function () use (&$isAsyncResolverFinished) {
+                                $isAsyncResolverFinished = true;
+
+                                return null;
+                            });
+                        },
+                    ],
+                ],
+            ]),
+        ]);
+
+        // Order is important here, as the promise has to be created before the synchronous error is thrown
+        $document = Parser::parse('
+            {
+                asyncNullError
+                syncNullError
+            }
+        ');
+
+        $result = Executor::execute($schema, $document);
+
+        self::assertNull($result->data);
+        self::assertCount(1, $result->errors);
+        self::assertSame(['syncNullError'], $result->errors[0]->getPath());
+        self::assertTrue($isAsyncResolverFinished);
+        self::assertSame(0, SyncPromiseQueue::count());
     }
 
     /** @see it('uses the inline operation if no operation name is provided') */
